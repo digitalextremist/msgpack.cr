@@ -1,38 +1,91 @@
+require "./to_msgpack"
+
+class Array(T)
+  def from_msgpack
+    Bytes.new(to_unsafe, size * sizeof(T)).from_msgpack
+  end
+end
+
+struct Slice
+  def from_msgpack
+    Msgpack::Decoder.decode(MemoryIO.new(self, false))
+  end
+end
+
+module IO
+  def from_msgpack
+    Msgpack::Decoder.decode(self)
+  end
+end
+
+
 module Msgpack
-  def self.decode(b : Bytes) : Type
-    decode(MemoryIO.new(b, false))
-  end
+  module Decodable
+    abstract def decode?(e : Msgpack::Extension) : Bool
+    abstract def decode(e : Msgpack::Extension)
+    abstract def filter(v : Msgpack::Encodable) : Msgpack::Encodable
 
-  def self.decode(b : Array) : Type
-    decode(Bytes.new(b.to_unsafe, b.size * sizeof(typeof(b[0]))))
-  end
+    def register_filter
+      Msgpack::Decoder.register_filter(filter_to_proc)
+    end
 
-  def self.decode(r : IO) : Type
-    d = Decoder.new
-    d.r = r
-    d.decode
-  end
+    def unregister_filter
+      Msgpack::Decoder.unregister_filter(filter_to_proc)
+    end
 
-  def self.decode(s : String) : Type
-    decode(s.reader)
-_ end   
+    def filter_to_proc
+      ->filter(Msgpack::Encodable)
+    end
+
+    def with_filter
+      register_filter
+      yield
+    ensure
+      unregister_filter
+    end
+  end
 
   class Decoder
     # reader
     property! r : IO
-    
-    def decode : Type
-      res = Array(Type).new
+
+    alias FilterProc = Msgpack::Encodable -> Msgpack::Encodable
+    @@filters = [] of FilterProc
+
+    def self.unregister_filter(f : FilterProc)
+      @@filters.delete f
+    end
+
+    def self.register_filter(f : FilterProc)
+      unregister_filter f
+      @@filters << f
+    end
+
+    private def initialize(@r : IO)
+    end
+
+    def self.decode(r : IO)
+      new(r).decode
+    end
+
+    def decode
+      res = Array(typeof(decode!)).new
       begin
         until eof?
           res << decode!
         end
       rescue IO::EOFError
       end
-      res.size == 1 ? res[0] : res
+      (res.size == 1) ? res[0] : res
     end
 
-    private def decode! : Type
+    private def decode!
+      x = _decode!
+      @@filters.each { |f| x = f.call(x) }
+      x
+    end
+
+    private def _decode!
       case c = read_u8
       when 0x80..0x8f
         read_map((c & 0x0f).to_u32)
@@ -80,6 +133,16 @@ _ end
         read_i32
       when 0xd3
         read_i64
+      when 0xd4
+        read_ext(1_u32)
+      when 0xd5
+        read_ext(2_u32)
+      when 0xd6
+        read_ext(4_u32)
+      when 0xd7
+        read_ext(8_u32)
+      when 0xd8
+        read_ext(16_u32)
       when 0xd9
         read_string(read_u8.to_u32)
       when 0xda
@@ -104,7 +167,7 @@ _ end
     private def eof? : Bool
       case r
       when MemoryIO, File
-        f = r as File | MemoryIO
+        f = r.as(File | MemoryIO)
         f.tell == f.size
       else
         false
@@ -112,22 +175,21 @@ _ end
     end
 
     private def read_string(n : UInt32) : String
-      String.new(n) { |buf| read(Slice.new(buf, n)) }
+      String.new(read(n))
     end
 
     private def read_bin(n : UInt32) : Bytes
       read(n)
     end
 
-    private def read_ext(n : UInt32) : Ext
-      Ext.new do |e|
-        e.type = read_i8
-        e.data = read(n)
-      end
+    private def read_ext(n : UInt32) : Msgpack::Extension
+      type = read_i8
+      data = read(n)
+      Msgpack::Extension.new(type, data)
     end
 
-    private def read_map(n : UInt32) : Hash(Type, Type)
-      res = Hash(Type, Type).new(initial_capacity = n)
+    private def read_map(n : UInt32) : Hash(Encodable, Encodable)
+      res = Hash(Encodable, Encodable).new
       n.times do
         k = decode!
         v = decode!
@@ -136,8 +198,8 @@ _ end
       res
     end
 
-    private def read_array(n : UInt32) : Array(Type)
-      res = Array(Type).new
+    private def read_array(n : UInt32) : Array(Encodable)
+      res = Array(Encodable).new
       n.times { res << decode! }
       res
     end
@@ -167,14 +229,11 @@ _ end
     define_reader Float32, float32
     define_reader Float64, float64
 
-    private def read(buf : Bytes) : Bytes 
+    private def read(n : UInt32) : Bytes
+      buf = Bytes.new(n)
       actual = r.read(buf)
-      raise "Truncated input" unless actual == buf.size
+      raise "Truncated input" unless actual == n
       buf
-    end
-
-    private def read(n : UInt32) : Bytes 
-      read(Bytes.new(n))
     end
   end
 end

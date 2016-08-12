@@ -20,7 +20,21 @@ dependencies:
 
 ```crystal
 require "msgpack"
+
+1.to_msgpack # => Slice[210, 0, 0, 0, 1]
+
+# write 2_i32 to file foo.msgpack
+File.open("foo.msgpack", "w") { |f| f.write(2.to_msgpack) }
+
 ```
+
+## Extending
+### Encoding
+
+Any type can become encodable by including `Msgpack::Encodable` and defining `to_msgpack(io : IO)`
+### Decoding
+
+Any type can become decodable by following the [example](spec/foo_spec.cr)
 
 ## Development
 

@@ -1,10 +1,9 @@
 module Msgpack
-  class Ext
+  class Extension
     property! type : Int8
     property! data : Bytes
 
-    def initialize
-      yield(self)
+    def initialize(@type : Int8, @data : Bytes)
     end
 
     def reserved_type?
@@ -14,5 +13,5 @@ module Msgpack
     def custom_type?
       !reserved_type?
     end
-  end  
+  end
 end
